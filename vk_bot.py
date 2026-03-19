@@ -308,7 +308,7 @@ for event in longpoll.listen():
                 for suggestion in submissions['suggestions']:
                     if suggestion['status'] == 'На рассмотрении' and suggestion['id'] == last_submitted_id.get(str(user_id)):
                         suggestion['status'] = 'Одобрена'
-                        send_message(suggestion['user_id'], '✅ Ваше предложение одобрено! Вы получите гонорар до 50000 РУБ!')
+                        send_message(suggestion['user_id'], '✅ Ваше предложение одобрено! Вы получите гонорар до 50000 донат рублей!')
                         save_data()
                         break
             elif text == '❌ Отклонить':
