@@ -6,28 +6,17 @@ import os
 import re
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-# Администраторы (числовой VK ID)
-ADMINS = {
-    837981973: 'TVER',   # Основатель TVER
-    522894540: 'PERM',   # Основатель PERM
-    314950036: 'BUGS'    # Модератор багов
-}
-
+ADMINS = {'lev3438': 'TVER', 'stepkozdez': 'PERM', 'sanzhardell': 'BUGS'}
 TOKEN = 'vk1.a.yJNtmSw2-G_BeHBvomh_VdgYfjJb_844uFDNBrwSVmcCi1fPUtJ3U2XdPjNyC-FWWqko6bvjBldYpC5dJL9WINOPS16-T_7cW2YEWMHoX1hq8R4uulyqYAvNvFvhZ148C4gjmFgjNZvM0RGz1TZwRGw0lET3TC5wO5916DiS77z7q82CIwFbI_MrGk3qnnHpoopp9vdRZXOA0GjsnwnLBg'
-
 vk = vk_api.VkApi(token=TOKEN)
 api = vk.get_api()
 longpoll = VkLongPoll(vk)
-
 DATA_FILE = 'bot_data.json'
 user_states = {}
 submissions = {'norms': [], 'bugs': [], 'suggestions': []}
 submission_counter = 0
 last_submitted_id = {}
 
-# ----------------------
-# Работа с данными
-# ----------------------
 def load_data():
     global submissions, submission_counter
     if os.path.exists(DATA_FILE):
@@ -49,23 +38,15 @@ def cleanup_old_submissions():
     submissions['suggestions'] = [s for s in submissions['suggestions'] if (datetime.fromisoformat(s['timestamp']) + timedelta(days=7)) > now]
     save_data()
 
-# ----------------------
-# Клавиатуры
-# ----------------------
 def get_main_keyboard():
     kb = VkKeyboard(one_time=False)
-    kb.add_button('📄 Отправить норму', color=VkKeyboardColor.POSITIVE)
-    kb.add_button('🐞 Нашел баг', color=VkKeyboardColor.NEGATIVE)
+    kb.add_button('Отправить норму', color=VkKeyboardColor.POSITIVE)
+    kb.add_button('Нашел баг', color=VkKeyboardColor.NEGATIVE)
     kb.add_line()
-    kb.add_button('💡 Предложение', color=VkKeyboardColor.POSITIVE)
+    kb.add_button('Предложение', color=VkKeyboardColor.POSITIVE)
     kb.add_line()
-    kb.add_button('📋 Мои заявки', color=VkKeyboardColor.PRIMARY)
-    kb.add_button('❓ Помощь', color=VkKeyboardColor.SECONDARY)
-    return kb.get_keyboard()
-
-def get_cancel_keyboard():
-    kb = VkKeyboard(one_time=True)
-    kb.add_button('❌ Отмена', color=VkKeyboardColor.NEGATIVE)
+    kb.add_button('Мои заявки', color=VkKeyboardColor.PRIMARY)
+    kb.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
     return kb.get_keyboard()
 
 def get_approval_keyboard():
@@ -74,9 +55,6 @@ def get_approval_keyboard():
     kb.add_button('❌ Отклонить', color=VkKeyboardColor.NEGATIVE)
     return kb.get_keyboard()
 
-# ----------------------
-# Утилиты
-# ----------------------
 def send_message(user_id, message, keyboard=None):
     api.messages.send(user_id=user_id, message=message, keyboard=keyboard, random_id=0)
 
@@ -84,44 +62,31 @@ def validate_vk_link(link):
     pattern = r'(https?://)?(www\.)?vk\.com/\S+|https://vk\.com/wall\d+_\d+'
     return re.match(pattern, link) is not None
 
-def cancel_submission(user_id):
-    if user_id in user_states:
-        del user_states[user_id]
-        send_message(user_id, '❌ Ввод отменен. Вы вернулись в главное меню.', get_main_keyboard())
-    else:
-        send_message(user_id, 'Вы не начали заполнение формы.', get_main_keyboard())
-
-# =======================
-# НОРМЫ
-# =======================
 def start_norm_submission(user_id):
     user_states[user_id] = {'type': 'norm', 'step': 1, 'data': {}}
-    send_message(user_id, '📋 Начнем заполнение анкеты нормы!\n\n1️⃣ Введите ваш никнейм:', get_cancel_keyboard())
+    send_message(user_id, '📋 Начнем заполнение анкеты нормы!\n\n1️⃣ Введите ваш никнейм:')
 
 def handle_norm_step(user_id, text):
-    if text == '❌ Отмена':
-        cancel_submission(user_id)
-        return
     state = user_states[user_id]
     if state['step'] == 1:
         state['data']['nickname'] = text
         state['step'] = 2
-        send_message(user_id, '2️⃣ Введите вашу должность:', get_cancel_keyboard())
+        send_message(user_id, '2️⃣ Введите вашу должность:')
     elif state['step'] == 2:
         state['data']['position'] = text
         state['step'] = 3
-        send_message(user_id, '3️⃣ Опишите проделанную работу:', get_cancel_keyboard())
+        send_message(user_id, '3️⃣ Опишите проделанную работу:')
     elif state['step'] == 3:
         state['data']['work'] = text
         state['step'] = 4
-        send_message(user_id, '4️⃣ Отправьте доказательства (ссылка на пост ВК или фото):', get_cancel_keyboard())
+        send_message(user_id, '4️⃣ Отправьте доказательства (ссылка на пост ВК или фото):')
     elif state['step'] == 4:
         if validate_vk_link(text):
             state['data']['proof'] = text
             state['step'] = 5
-            send_message(user_id, '5️⃣ Выберите ваш сервер:\n1 - TVER\n2 - PERM\n\nВведите номер (1 или 2):', get_cancel_keyboard())
+            send_message(user_id, '5️⃣ Выберите ваш сервер:\n1 - TVER\n2 - PERM\n\nВведите номер (1 или 2):')
         else:
-            send_message(user_id, '❌ Некорректная ссылка! Отправьте ссылку на пост ВК.', get_cancel_keyboard())
+            send_message(user_id, '❌ Некорректная ссылка! Отправьте ссылку на пост ВК (например: https://vk.com/wall...)')
     elif state['step'] == 5:
         if text in ['1', '2']:
             server = 'TVER' if text == '1' else 'PERM'
@@ -138,44 +103,43 @@ def handle_norm_step(user_id, text):
             }
             submissions['norms'].append(submission)
             save_data()
-            send_message(user_id, f'✅ Заявка №{submission_counter} отправлена на рассмотрение!\n\nСтатус: На рассмотрении', get_main_keyboard())
-            # Отправка администратору
-            admin_id = 837981973 if server == 'TVER' else 522894540
-            admin_msg = f"📬 Новая заявка №{submission_counter} на норму:\n\n👤 Никнейм: {state['data']['nickname']}\n💼 Должность: {state['data']['position']}\n📝 Работа: {state['data']['work']}\n🔗 Доказательства: {state['data']['proof']}\n🗺️ Сервер: {server}"
+            send_message(user_id, f'✅ Заявка №{submission_counter} отправлена на рассмотрение!\n\nСтатус: На рассмотрении')
+            admin_id = 'lev3438' if server == 'TVER' else 'stepkozdez'
+            admin_msg = f"📬 Новая заявка №{submission_counter} на норму:\n\n"
+            admin_msg += f"👤 Никнейм: {state['data']['nickname']}\n"
+            admin_msg += f"💼 Должность: {state['data']['position']}\n"
+            admin_msg += f"📝 Работа: {state['data']['work']}\n"
+            admin_msg += f"🔗 Доказательства: {state['data']['proof']}\n"
+            admin_msg += f"🗺️ Сервер: {server}"
             send_message(admin_id, admin_msg, get_approval_keyboard())
             last_submitted_id[admin_id] = submission_counter
             del user_states[user_id]
         else:
-            send_message(user_id, '❌ Введите 1 или 2!', get_cancel_keyboard())
+            send_message(user_id, '❌ Введите 1 или 2!')
 
-# =======================
-# БАГИ
-# =======================
 def start_bug_report(user_id):
     user_states[user_id] = {'type': 'bug', 'step': 1, 'data': {}}
-    send_message(user_id, '🐛 Начнем заполнение отчета о баге!\n\n1️⃣ Что за баг:', get_cancel_keyboard())
+    send_message(user_id, '🐛 Начнем заполнение отчета о баге!\n\n1️⃣ Что за баг:')
 
 def handle_bug_step(user_id, text):
-    if text == '❌ Отмена':
-        cancel_submission(user_id)
-        return
     state = user_states[user_id]
     if state['step'] == 1:
         state['data']['bug_description'] = text
         state['step'] = 2
-        send_message(user_id, '2️⃣ Где находится баг:', get_cancel_keyboard())
+        send_message(user_id, '2️⃣ Где находится баг:')
     elif state['step'] == 2:
         state['data']['bug_location'] = text
         state['step'] = 3
-        send_message(user_id, '3️⃣ Доказательства (ссылка на ВК или фото; чтобы пропустить напишите -):', get_cancel_keyboard())
+        send_message(user_id, '3️⃣ Доказательства (ссылка на ВК или фото; чтобы пропустить напишите -):\n\nДоказательства:')
     elif state['step'] == 3:
         if text == '-':
             state['data']['proof'] = 'Не предоставлены'
-        elif validate_vk_link(text):
-            state['data']['proof'] = text
         else:
-            send_message(user_id, '❌ Некорректная ссылка! Введите ссылку на пост ВК или -', get_cancel_keyboard())
-            return
+            if validate_vk_link(text):
+                state['data']['proof'] = text
+            else:
+                send_message(user_id, '❌ Некорректная ссылка! Отправьте ссылку на пост ВК или введите -')
+                return
         global submission_counter
         submission_counter += 1
         submission = {
@@ -188,33 +152,29 @@ def handle_bug_step(user_id, text):
         }
         submissions['bugs'].append(submission)
         save_data()
-        send_message(user_id, f'✅ Баг №{submission_counter} отправлен на рассмотрение!\n\nСтатус: На рассмотрении', get_main_keyboard())
-        admin_id = 314950036
-        admin_msg = f"🐛 Новый отчет о баге №{submission_counter}:\n\n❓ Баг: {state['data']['bug_description']}\n📍 Место: {state['data']['bug_location']}\n🔗 Доказательства: {state['data']['proof']}"
-        send_message(admin_id, admin_msg, get_approval_keyboard())
-        last_submitted_id[admin_id] = submission_counter
+        send_message(user_id, f'✅ Баг №{submission_counter} отправлен на рассмотрение!\n\nСтатус: На рассмотрении')
+        admin_msg = f"🐛 Новый отчет о баге №{submission_counter}:\n\n"
+        admin_msg += f"❓ Баг: {state['data']['bug_description']}\n"
+        admin_msg += f"📍 Место: {state['data']['bug_location']}\n"
+        admin_msg += f"🔗 Доказательства: {state['data']['proof']}"
+        send_message('sanzhardell', admin_msg, get_approval_keyboard())
+        last_submitted_id['sanzhardell'] = submission_counter
         del user_states[user_id]
 
-# =======================
-# ПРЕДЛОЖЕНИЯ
-# =======================
 def start_suggestion(user_id):
     user_states[user_id] = {'type': 'suggestion', 'step': 1, 'data': {}}
-    send_message(user_id, '💡 Начнем заполнение предложения по обновлению!\n\n1️⃣ Введите ваш никнейм:', get_cancel_keyboard())
+    send_message(user_id, '💡 Начнем заполнение предложения по обновлению!\n\n1️⃣ Введите ваш никнейм:')
 
 def handle_suggestion_step(user_id, text):
-    if text == '❌ Отмена':
-        cancel_submission(user_id)
-        return
     state = user_states[user_id]
     if state['step'] == 1:
         state['data']['nickname'] = text
         state['step'] = 2
-        send_message(user_id, '2️⃣ Ваше предложение (краткое описание):', get_cancel_keyboard())
+        send_message(user_id, '2️⃣ Ваше предложение (краткое описание):')
     elif state['step'] == 2:
         state['data']['suggestion'] = text
         state['step'] = 3
-        send_message(user_id, '3️⃣ Введите дату и подпись:', get_cancel_keyboard())
+        send_message(user_id, '3️⃣ Введите дату и время (например: 19.03.2026 15:45):')
     elif state['step'] == 3:
         state['data']['datetime'] = text
         global submission_counter
@@ -229,27 +189,87 @@ def handle_suggestion_step(user_id, text):
         }
         submissions['suggestions'].append(submission)
         save_data()
-        send_message(user_id, f'✅ Ваше предложение №{submission_counter} успешно отправлено!', get_main_keyboard())
-        admin_id = 314950036
-        admin_msg = f"💡 НОВОЕ ПРЕДЛОЖЕНИЕ №{submission_counter}\n\n👤 Никнейм: {state['data']['nickname']}\n📝 Предложение: {state['data']['suggestion']}\n📅 Дата и время: {state['data']['datetime']}"
-        send_message(admin_id, admin_msg, get_approval_keyboard())
-        last_submitted_id[admin_id] = submission_counter
+        send_message(user_id, f'✅ Ваше предложение №{submission_counter} успешно отправлено!\n\n💰 Если ваше предложение будет одобрено, вы получите гонорар до 50000 РУБ (донат)!\n\nСпасибо за вклад в развитие проекта!')
+        admin_msg = f"💡 НОВОЕ ПРЕДЛОЖЕНИЕ №{submission_counter}\n\n"
+        admin_msg += f"👤 Никнейм: {state['data']['nickname']}\n"
+        admin_msg += f"📝 Предложение: {state['data']['suggestion']}\n"
+        admin_msg += f"📅 Дата и время: {state['data']['datetime']}\n"
+        admin_msg += f"💰 Награда при одобрении: до 50000 РУБ (донат)"
+        send_message('sanzhardell', admin_msg, get_approval_keyboard())
+        last_submitted_id['sanzhardell'] = submission_counter
         del user_states[user_id]
 
-# =======================
-# Основной цикл
-# =======================
+def show_my_requests(user_id):
+    my_norms = [n for n in submissions['norms'] if n['user_id'] == user_id]
+    my_bugs = [b for b in submissions['bugs'] if b['user_id'] == user_id]
+    my_suggestions = [s for s in submissions['suggestions'] if s['user_id'] == user_id]
+    message = '📋 Ваши заявки:\n\n'
+    if my_norms:
+        message += '📝 НОРМЫ:\n'
+        for norm in my_norms:
+            message += f"  №{norm['id']} - {norm['status']}\n"
+    if my_bugs:
+        message += '\n🐛 БАГИ:\n'
+        for bug in my_bugs:
+            message += f"  №{bug['id']} - {bug['status']}\n"
+    if my_suggestions:
+        message += '\n💡 ПРЕДЛОЖЕНИЯ:\n'
+        for suggestion in my_suggestions:
+            message += f"  №{suggestion['id']} - {suggestion['status']}\n"
+    if not my_norms and not my_bugs and not my_suggestions:
+        message = '📋 У вас нет заявок'
+    send_message(user_id, message, get_main_keyboard())
+
+def show_help(user_id):
+    help_text = '''📚 СПРАВКА ПО ИСПОЛЬЗОВАНИЮ БОТА:
+
+✅ ОТПРАВИТЬ НОРМУ:
+1. Выберите кнопку "Отправить норму"
+2. Заполните форму:
+   - Никнейм
+   - Должность
+   - Проделанная работа
+   - Доказательства (ссылка на пост ВК)
+   - Выберите сервер (1-TVER, 2-PERM)
+3. Заявка отправится основателю сервера
+4. Проверяйте статус в "Мои заявки"
+
+🐛 НАШЕЛ БАГ:
+1. Выберите кнопку "Нашел баг"
+2. Заполните форму:
+   - Описание бага
+   - Место нахождения
+   - Доказательства (опционально, введите -)
+3. Заявка отправится модератору
+4. Проверяйте статус в "Мои заявки"
+
+💡 ПРЕДЛОЖЕНИЕ:
+1. Выберите кнопку "Предложение"
+2. Заполните форму:
+   - Ваш никнейм
+   - Ваше предложение (краткое описание)
+   - Дату и время
+3. Если ваше предложение одобрят, вы получите гонорар до 50000 РУБ (донат)!
+4. Проверяйте статус в "Мои заявки"
+
+📋 МОИ ЗАЯВКИ:
+- Просмотрите все ваши заявки и их статусы
+- Статусы: На рассмотрении, Одобрена, Отклонена
+- Заявки удаляются через 7 дней
+
+Статусы:
+✅ Одобрена - заявка принята!
+❌ Отклонена - заявка отклонена
+⏳ На рассмотрении - ожидание решения'''
+    send_message(user_id, help_text, get_main_keyboard())
+
 load_data()
+
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
         user_id = event.user_id
-        text = event.text.strip()
+        text = event.text
         cleanup_old_submissions()
-
-        if text == '❌ Отмена':
-            cancel_submission(user_id)
-            continue
-
         if user_id in user_states:
             state_type = user_states[user_id]['type']
             if state_type == 'norm':
@@ -258,15 +278,58 @@ for event in longpoll.listen():
                 handle_bug_step(user_id, text)
             elif state_type == 'suggestion':
                 handle_suggestion_step(user_id, text)
-        elif text == '📄 Отправить норму':
+        elif text == 'Отправить норму':
             start_norm_submission(user_id)
-        elif text == '🐞 Нашел баг':
+        elif text == 'Нашел баг':
             start_bug_report(user_id)
-        elif text == '💡 Предложение':
+        elif text == 'Предложение':
             start_suggestion(user_id)
-        elif text == '📋 Мои заявки':
+        elif text == 'Мои заявки':
             show_my_requests(user_id)
-        elif text == '❓ Помощь':
+        elif text == 'Помощь':
             show_help(user_id)
-        elif text.lower() in ['/start', 'start', 'старт', '/старт', 'начать', '/начать']:
+        elif text == '/start':
             send_message(user_id, '👋 Добро пожаловать в бот управления нормами и багами!', get_main_keyboard())
+        elif str(user_id) in ADMINS:
+            if text == '✅ Одобрить':
+                send_message(user_id, '✅ Заявка одобрена!')
+                for norm in submissions['norms']:
+                    if norm['status'] == 'На рассмотрении' and norm['id'] == last_submitted_id.get(str(user_id)):
+                        norm['status'] = 'Одобрена'
+                        send_message(norm['user_id'], '✅ Ваша заявка одобрена!')
+                        save_data()
+                        break
+                for bug in submissions['bugs']:
+                    if bug['status'] == 'На рассмотрении' and bug['id'] == last_submitted_id.get(str(user_id)):
+                        bug['status'] = 'Одобрена'
+                        send_message(bug['user_id'], '✅ Ваша заявка одобрена!')
+                        save_data()
+                        break
+                for suggestion in submissions['suggestions']:
+                    if suggestion['status'] == 'На рассмотрении' and suggestion['id'] == last_submitted_id.get(str(user_id)):
+                        suggestion['status'] = 'Одобрена'
+                        send_message(suggestion['user_id'], '✅ Ваше предложение одобрено! Вы получите гонорар до 50000 донат рублей!')
+                        save_data()
+                        break
+            elif text == '❌ Отклонить':
+                send_message(user_id, '❌ Заявка отклонена.')
+                for norm in submissions['norms']:
+                    if norm['status'] == 'На рассмотрении' and norm['id'] == last_submitted_id.get(str(user_id)):
+                        norm['status'] = 'Отклонена'
+                        send_message(norm['user_id'], '❌ Ваша заявка отклонена.')
+                        save_data()
+                        break
+                for bug in submissions['bugs']:
+                    if bug['status'] == 'На рассмотрении' and bug['id'] == last_submitted_id.get(str(user_id)):
+                        bug['status'] = 'Отклонена'
+                        send_message(bug['user_id'], '❌ Ваша заявка отклонена.')
+                        save_data()
+                        break
+                for suggestion in submissions['suggestions']:
+                    if suggestion['status'] == 'На рассмотрении' and suggestion['id'] == last_submitted_id.get(str(user_id)):
+                        suggestion['status'] = 'Отклонена'
+                        send_message(suggestion['user_id'], '❌ Ваше предложение отклонено.')
+                        save_data()
+                        break
+        else:
+            send_message(user_id, '👋 Используйте меню ниже для навигации', get_main_keyboard())
