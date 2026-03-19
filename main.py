@@ -6,7 +6,7 @@ import os
 import re
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-ADMINS = {'lev3438': 'TVER', 'stepkozdez': 'PERM', 'sanzhardell': 'BUGS'}
+ADMINS = {'837981973': 'TVER', '522894540': 'PERM', '314950036': 'BUGS'}
 TOKEN = 'vk1.a.yJNtmSw2-G_BeHBvomh_VdgYfjJb_844uFDNBrwSVmcCi1fPUtJ3U2XdPjNyC-FWWqko6bvjBldYpC5dJL9WINOPS16-T_7cW2YEWMHoX1hq8R4uulyqYAvNvFvhZ148C4gjmFgjNZvM0RGz1TZwRGw0lET3TC5wO5916DiS77z7q82CIwFbI_MrGk3qnnHpoopp9vdRZXOA0GjsnwnLBg'
 vk = vk_api.VkApi(token=TOKEN)
 api = vk.get_api()
