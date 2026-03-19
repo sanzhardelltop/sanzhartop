@@ -288,8 +288,8 @@ for event in longpoll.listen():
             show_my_requests(user_id)
         elif text == 'Помощь':
             show_help(user_id)
-        elif text == '/start':
-            send_message(user_id, '👋 Добро пожаловать в бот управления нормами и багами!', get_main_keyboard())
+        elif text.lower().strip() in ['/start', 'start', 'старт', '/старт', 'начать', '/начать']:
+                send_message(user_id, '👋 Добро пожаловать в бот управления нормами и багами!', get_main_keyboard())
         elif str(user_id) in ADMINS:
             if text == '✅ Одобрить':
                 send_message(user_id, '✅ Заявка одобрена!')
