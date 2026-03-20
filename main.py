@@ -1,7 +1,9 @@
 import os
 from flask import Flask
 
-app = Flask(__name__)
+@app.route('/')
+def health():
+    return "VK Bot is running", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))  # Default to 5000 if PORT not set
@@ -26,6 +28,16 @@ OWNER_1 = os.environ.get("VK_OWNER_1", "stepkozdez")
 OWNER_0 = os.environ.get("VK_OWNER_0", "lev3438")
 
 owner_cache = {}
+
+def run_bot():
+    print("🤖 БОТ ЗАПУЩЕН!!!", flush=True)
+    while True:
+        try:
+            for event in longpoll.listen():
+                process_event(event)
+        except Exception as e:
+            print(f"❌ Ошибка в longpoll: {e}", flush=True)
+            time.sleep(5)
 
 def resolve_user_id(owner):
     """Resolve a VK user identifier.
@@ -625,4 +637,10 @@ if __name__ == "__main__":
             print(f"Критическая ошибка, перезапускаю бота через 5 сек: {e}")
             traceback.print_exc()
             time.sleep(5)
-
+            
+if __name__ == "__main__":
+    print("⚙️ Инициализация бота...", flush=True)
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    print("🌐 Flask запускается...", flush=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
