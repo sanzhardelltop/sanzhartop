@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: vk-bot
+    env: python
+    plan: free
+    # Install dependencies before starting (Render will also do this automatically if you have requirements.txt)
+    buildCommand: pip install -r requirements.txt
+    # Use unbuffered output to ensure logs appear immediately
+    startCommand: python -u main.py
+    # Set VK_TOKEN, VK_OWNER_0, VK_OWNER_1 (and optionally VK_BUG_OWNER) in Render dashboard (Environment variables)
