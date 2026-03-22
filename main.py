@@ -1,646 +1,921 @@
-import os
-from flask import Flask
+import warnings
+warnings.filterwarnings('ignore')
 
-@app.route('/')
-def health():
-    return "VK Bot is running", 200
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Default to 5000 if PORT not set
-    app.run(host='0.0.0.0', port=port)
-    import os
-import re
+import logging
+import sqlite3
+import json
 import time
-import traceback
-from typing import Optional
-
+import random
+from datetime import datetime, timedelta
+import threading
+import re
 import vk_api
-from vk_api.longpoll import VkLongPoll, VkEventType
-from vk_api.keyboard import VkKeyboard, VkKeyboardColor
-from vk_api.utils import get_random_id
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 
-# --- Настройки ---
-TOKEN = os.environ.get(
-    "VK_TOKEN",
-    "vk1.a.yJNtmSw2-G_BeHBvomh_VdgYfjJb_844uFDNBrwSVmcCi1fPUtJ3U2XdPjNyC-FWWqko6bvjBldYpC5dJL9WINOPS16-T_7cW2YEWMHoX1hq8R4uulyqYAvNvFvhZ148C4gjmFgjNZvM0RGz1TZwRGw0lET3TC5wO5916DiS77z7q82CIwFbI_MrGk3qnnHpoopp9vdRZXOA0GjsnwnLBg",
-)
-OWNER_1 = os.environ.get("VK_OWNER_1", "stepkozdez")
-OWNER_0 = os.environ.get("VK_OWNER_0", "lev3438")
+logging.basicConfig(filename='bot.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-owner_cache = {}
+def log_action(action):
+    logging.info(action)
 
-def run_bot():
-    print("🤖 БОТ ЗАПУЩЕН!!!", flush=True)
-    while True:
-        try:
-            for event in longpoll.listen():
-                process_event(event)
-        except Exception as e:
-            print(f"❌ Ошибка в longpoll: {e}", flush=True)
-            time.sleep(5)
+# Настройки
+TOKEN = 'vk1.a.juJVK1BLRRDdBMVFwfT1xUdhSLZbJE67ze7-0LfEqvwbr4vz7GUSMP4EHGax3fFJA9sqQI3KvSt4L1tJ_OEDeedkoQTgfOqT8TfaxNYOHle1qC3KbANHuhah7sQqGUfHyRHsDoKPZjmxSirE-wLqPpUI4DpRNfBVgqaR4BWCwe8qwJNvyEHeOmoWpkzyut1ZLoE62ezUOAAiiQTTmMBTpA'
+OWNER_USERNAMES = ['werentersp7607', 'sanzhardell']
 
-def resolve_user_id(owner):
-    """Resolve a VK user identifier.
-
-    If owner is numeric (or numeric string), returns int.
-    Otherwise, calls VK API to resolve screen name to user id.
-    """
-    if owner is None:
-        return None
-
-    if isinstance(owner, int):
-        return owner
-
-    if isinstance(owner, str) and owner.isdigit():
-        return int(owner)
-
-    if owner in owner_cache:
-        return owner_cache[owner]
-
-    try:
-        res = vk.users.get(user_ids=owner)
-        if res and isinstance(res, list) and len(res) > 0:
-            uid = res[0].get("id")
-            owner_cache[owner] = uid
-            return uid
-    except Exception as e:
-        print(f"Ошибка resolve_user_id для {owner}: {e}")
-
-    return None
-
+# Инициализация VK API
 vk_session = vk_api.VkApi(token=TOKEN)
 vk = vk_session.get_api()
-longpoll = VkLongPoll(vk_session)
+try:
+    group_id = vk.groups.getById()[0]['id']
+    print(f"Group ID: {group_id}")
+except Exception as e:
+    print(f"Ошибка получения group_id: {e}")
+    exit(1)
+longpoll = VkBotLongPoll(vk_session, group_id)
+print("Longpoll initialized")
 
-user_data = {}
+# База данных
+conn = sqlite3.connect('bot.db', check_same_thread=False)
+cursor = conn.cursor()
 
-# Приложения (заявки) хранится в памяти (не сохраняется между перезапусками бота)
-# app_id -> application dict
-applications = {}
-# Индексы для быстрого поиска
-applications_by_user = {}  # user_id -> [app_id]
-applications_by_owner = {}  # owner_id -> [app_id]
-next_application_id = 1
+# Создание таблиц
+cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    role INTEGER DEFAULT 0,
+    nick TEXT,
+    sparks INTEGER DEFAULT 100,
+    warns INTEGER DEFAULT 0,
+    mutes TEXT,
+    bans TEXT,
+    marriage INTEGER,
+    exes TEXT DEFAULT '[]',
+    exp INTEGER DEFAULT 0,
+    level INTEGER DEFAULT 1,
+    last_message INTEGER DEFAULT 0,
+    message_count INTEGER DEFAULT 0,
+    game TEXT
+)''')
 
-# Срок жизни заявки (на обработку) — 7 дней
-APPLICATION_EXPIRY_SECONDS = 7 * 24 * 60 * 60
+cursor.execute('''CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY,
+    rules TEXT DEFAULT 'Правила не установлены',
+    welcome TEXT DEFAULT 'Добро пожаловать!',
+    filter_words TEXT DEFAULT '[]',
+    antiflood INTEGER DEFAULT 5,
+    slowmode INTEGER DEFAULT 0
+)''')
 
-# Для баг-репортов (отправляется владельцу)
-BUG_OWNER = os.environ.get("VK_BUG_OWNER", "sanzhardell")
+cursor.execute('''CREATE TABLE IF NOT EXISTS roles (
+    priority INTEGER PRIMARY KEY,
+    name TEXT
+)''')
 
-def make_main_keyboard():
-    kb = VkKeyboard(one_time=False)
-    kb.add_button("📄 Отправить норму", color=VkKeyboardColor.PRIMARY)
-    kb.add_button("🐞 Нашел баг", color=VkKeyboardColor.SECONDARY)
-    kb.add_line()
-    kb.add_button("� Предложение", color=VkKeyboardColor.SECONDARY)
-    kb.add_button("📋 Мои заявки", color=VkKeyboardColor.SECONDARY)
-    kb.add_line()
-    kb.add_button("ℹ️ Помощь", color=VkKeyboardColor.SECONDARY)
-    kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
-    return kb.get_keyboard()
+cursor.execute('''CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    time INTEGER,
+    message TEXT
+)''')
 
+cursor.execute('''CREATE TABLE IF NOT EXISTS polls (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER,
+    question TEXT,
+    options TEXT,
+    votes TEXT DEFAULT '{}'
+)''')
 
-def make_cancel_keyboard():
-    kb = VkKeyboard(one_time=True)
-    kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
-    return kb.get_keyboard()
+cursor.execute('''CREATE TABLE IF NOT EXISTS afk (
+    user_id INTEGER PRIMARY KEY,
+    reason TEXT,
+    time INTEGER
+)''')
 
+conn.commit()
 
-def make_owner_response_keyboard(app_id: str):
-    # Обычная клавиатура (не inline) работает гарантированно в любых клиентах VK.
-    kb = VkKeyboard(one_time=False, inline=False)
-    # Кнопки отправляют текст, который мы потом парсим (включаем ID заявки)
-    kb.add_button(f"✅ Сделано #{app_id}", color=VkKeyboardColor.POSITIVE)
-    kb.add_button(f"❌ Отказано #{app_id}", color=VkKeyboardColor.NEGATIVE)
-    return kb.get_keyboard()
+# Добавить недостающие столбцы в chats, если их нет
+try:
+    cursor.execute('ALTER TABLE chats ADD COLUMN antiflood INTEGER DEFAULT 5')
+except:
+    pass
+try:
+    cursor.execute('ALTER TABLE chats ADD COLUMN slowmode INTEGER DEFAULT 0')
+except:
+    pass
 
+conn.commit()
 
-def _parse_owner_response(text: str):
-    """Разбираем ответ владельца в формате +<id>, -<id>, или кнопок с ID."""
-    if not text:
-        return None, None
-    text = text.strip()
-
-    # Поддерживаем привычный формат +id / -id
-    if text[0] in "+-":
-        action = text[0]
-        app_id = text[1:].strip()
-        return action, app_id
-
-    # Разбор по ключевым словам + ID
-    app_id_match = re.search(r"(\d+)", text)
-    if not app_id_match:
-        return None, None
-    app_id = app_id_match.group(1)
-    lowered = text.lower()
-    if "одобр" in lowered or "✅" in text or "сделано" in lowered:
-        return "+", app_id
-    if "откл" in lowered or "❌" in text or "отказано" in lowered:
-        return "-", app_id
-    return None, None
-
-VK_LINK_RE = re.compile(r"https?://(m\.)?vk\.com/(wall(-?\d+_\d+)|club\d+|id\d+)(/.*)?$")
-
-
-def is_valid_vk_link(text: str) -> bool:
-    return bool(VK_LINK_RE.match(text.strip()))
-
-
-def extract_vk_link(text: str) -> Optional[str]:
-    text = (text or "").strip()
-    if not text:
-        return None
-    # Оставляем только ссылку, если пришло несколько слов
-    parts = text.split()
-    for part in parts:
-        if is_valid_vk_link(part):
-            return part
-    return None
-
-
-def _get_status_label(status: str, kind: str = None) -> str:
-    if status == "pending":
-        return "🟡 На рассмотрении"
-    if status == "approved":
-        if kind in ["bug", "improvement"]:
-            return "🟢 Будет сделано"
-        return "✅ Одобрено"
-    if status == "rejected":
-        if kind in ["bug", "improvement"]:
-            return "❌ Отказано"
-        return "❌ Отклонено"
-    return status
-
-
-def _format_app_summary(app: dict) -> str:
-    app_type = app.get("type")
-    status = _get_status_label(app.get("status", "pending"), kind=app_type)
-    kind = "Норма" if app_type == "norma" else "Баг" if app_type == "bug" else "Предложение"
-    server = app.get("data", {}).get("server")
-    server_part = f" ({server})" if server else ""
-    return f"[#{app['id']}] {kind}{server_part} — {status}"
-
-
-def list_applications_for_user(user_id: int) -> str:
-    app_ids = applications_by_user.get(user_id, [])
-    if not app_ids:
-        return "У тебя пока нет заявок."
-
-    lines = ["Твои заявки:"]
-    for app_id in app_ids:
-        app = applications.get(app_id)
-        if not app:
-            continue
-        lines.append(_format_app_summary(app))
-    return "\n".join(lines)
-
-
-def cleanup_old_applications():
-    """Удаляем заявки старше APPLICATION_EXPIRY_SECONDS."""
-    now = int(time.time())
-    expired = []
-    for app_id, app in list(applications.items()):
-        if now - app.get("created_at", 0) > APPLICATION_EXPIRY_SECONDS:
-            expired.append(app_id)
-
-    for app_id in expired:
-        app = applications.pop(app_id, None)
-        if not app:
-            continue
-        user_id = app.get("user_id")
-        owner_id = app.get("owner_id")
-        if user_id in applications_by_user:
-            applications_by_user[user_id] = [x for x in applications_by_user[user_id] if x != app_id]
-            if not applications_by_user[user_id]:
-                applications_by_user.pop(user_id, None)
-        if owner_id in applications_by_owner:
-            applications_by_owner[owner_id] = [x for x in applications_by_owner[owner_id] if x != app_id]
-            if not applications_by_owner[owner_id]:
-                applications_by_owner.pop(owner_id, None)
-
-
-def list_applications_for_owner(owner_id: int) -> str:
-    app_ids = applications_by_owner.get(owner_id, [])
-    if not app_ids:
-        return "У тебя пока нет назначенных заявок."
-
-    lines = ["Заявки для тебя:"]
-    for app_id in app_ids:
-        app = applications.get(app_id)
-        if not app:
-            continue
-        lines.append(_format_app_summary(app))
-    lines.append("\nЧтобы принять/отклонить, ответь +<id> или -<id>.")
-    return "\n".join(lines)
-
-
-def _create_application(user_id: int, app_type: str, data: dict, owner_id: int) -> dict:
-    global next_application_id
-    app_id = str(next_application_id)
-    next_application_id += 1
-    app = {
-        "id": app_id,
-        "type": app_type,
-        "status": "pending",
-        "user_id": user_id,
-        "owner_id": owner_id,
-        "data": data,
-        "created_at": int(time.time()),
+# Инициализация ролей
+def init_roles():
+    default_roles = {
+        0: 'Участник',
+        20: 'Помощник',
+        40: 'Модератор',
+        60: 'Администратор',
+        80: 'Главный администратор',
+        100: 'Владелец'
     }
-    applications[app_id] = app
-    applications_by_user.setdefault(user_id, []).append(app_id)
-    applications_by_owner.setdefault(owner_id, []).append(app_id)
-    return app
+    for priority, name in default_roles.items():
+        cursor.execute('INSERT OR IGNORE INTO roles (priority, name) VALUES (?, ?)', (priority, name))
+    conn.commit()
 
+init_roles()
 
-def _send_app_to_owner(app: dict):
-    owner_id = app.get("owner_id")
-    if owner_id is None:
-        return
-
-    title = "Новая заявка"
-    kind = app.get("type")
-    if kind == "bug":
-        title = "Новый баг-репорт"
-    elif kind == "improvement":
-        title = "Новое предложение по улучшению"
-
-    info = app.get("data", {})
-    if kind == "norma":
-        msg = (
-            f"{title} от {app.get('user_id')} (ID={app['id']}):\n"
-            f"Nick: {info.get('nickname', '(не указано)')}\n"
-            f"Должность: {info.get('position', '(не указано)')}\n"
-            f"Ссылка: {info.get('proof', '(не указано)')}\n"
-            f"Сделано: {info.get('done', '(не указано)')}\n"
-            f"Сервер: {info.get('server', '(не указано)')}\n\n"
-            "Ответь +<id> или -<id>."
-        )
-    elif kind == "bug":
-        proof = info.get('proof')
-        if not proof:
-            proof = '(не указано)'
-
-        msg = (
-            f"{title} от {app.get('user_id')} (ID={app['id']}):\n"
-            f"Что за баг: {info.get('description', '(не указано)')}\n"
-            f"Где: {info.get('location', '(не указано)')}\n"
-            f"Что хочет сделать: {info.get('desired', '(не указано)')}\n"
-            f"Ссылка/скрин: {proof}\n\n"
-            "Ответь кнопкой или +<id> / -<id>."
-        )
-    else:  # improvement
-        msg = (
-            f"{title} от {app.get('user_id')} (ID={app['id']}):\n"
-            f"Что хотите добавить: {info.get('what', '(не указано)')}\n"
-            f"Зачем это нужно: {info.get('why', '(не указано)')}\n"
-            f"Информация: {info.get('details', '(не указано)')}\n\n"
-            "Ответь кнопкой или +<id> / -<id>."
-        )
-
-    # Уведомляем основного владельца (BUG_OWNER), если он отличается
-    recipients = [owner_id]
-    bug_owner_id = resolve_user_id(BUG_OWNER)
-    if bug_owner_id and bug_owner_id != owner_id:
-        recipients.append(bug_owner_id)
-
-    for rid in set(recipients):
-        # Отправляем текст заявки, затем отдельное сообщение с клавиатурой, чтобы клавиатура точно появилась.
-        send_message(rid, msg)
-        send_message(rid, "Нажми кнопку ниже:", keyboard=make_owner_response_keyboard(app['id']))
-
-
-def send_message(user_id, message, keyboard=None, attachment=None, forward_messages=None):
-    # VK API требует int user_id (или numeric string) — но для бота лучше использовать peer_id.
+# Получение ID владельцев
+def get_user_id(username):
     try:
-        if isinstance(user_id, str) and user_id.isdigit():
-            user_id = int(user_id)
-    except Exception:
-        pass
+        user = vk.utils.resolveScreenName(screen_name=username)
+        return user['object_id'] if user['type'] == 'user' else None
+    except:
+        return None
 
-    # Сохраняем старый user_id в логике (для отладки)
-    peer_id = user_id
+OWNER_IDS = [get_user_id(u) for u in OWNER_USERNAMES if get_user_id(u)]
 
-    kwargs = {"peer_id": peer_id, "message": message, "random_id": get_random_id()}
-    if keyboard:
-        kwargs["keyboard"] = keyboard
-    if attachment:
-        kwargs["attachment"] = attachment
-    if forward_messages:
-        kwargs["forward_messages"] = forward_messages
+# Функции для работы с БД
+def get_user(user_id):
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    return cursor.fetchone()
 
-    # Логирование для отладки (когда заявка не доходит или кнопки не видны)
-    if "Новая заявка" in message or "Новый баг-репорт" in message:
-        print(
-            f"[DEBUG] send_message peer_id={peer_id} keyboard={'yes' if keyboard else 'no'} "
-            f"message=({message[:80]}...)"
-        )
-        print(f"[DEBUG] kwargs={kwargs}")
+def update_user(user_id, **kwargs):
+    user = get_user(user_id)
+    if not user:
+        cursor.execute('INSERT INTO users (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+    for key, value in kwargs.items():
+        cursor.execute(f'UPDATE users SET {key} = ? WHERE user_id = ?', (value, user_id))
+    conn.commit()
 
-    try:
-        vk.messages.send(**kwargs)
-    except Exception as e:
-        # Логируем, но не ломаем работу бота
-        print(f"Ошибка отправки сообщения peer_id={peer_id}: {e}")
+def get_role(user_id):
+    user = get_user(user_id)
+    return user[1] if user else 0
 
-def get_forward_id(event):
-    # Попытка найти идентификатор сообщения в разных форматах VkEvent
-    if hasattr(event, "message_id") and event.message_id:
-        return event.message_id
-    if hasattr(event, "message") and isinstance(event.message, dict):
-        for key in ("id", "message_id", "conversation_message_id"):
-            if key in event.message and event.message[key]:
-                return event.message[key]
-    if hasattr(event, "object") and isinstance(event.object, dict):
-        for key in ("message_id", "id", "conversation_message_id"):
-            if key in event.object and event.object[key]:
-                return event.object[key]
-    # Пробуем raw
-    if hasattr(event, "raw") and isinstance(event.raw, dict):
-        for key in ("message_id", "id", "conversation_message_id"):
-            if key in event.raw and event.raw[key]:
-                return event.raw[key]
-    return None
+def check_permission(user_id, required):
+    return get_role(user_id) >= required or user_id in OWNER_IDS
 
+def parse_user(arg):
+    # Парсинг пользователя из упоминания или ID
+    if arg.startswith('[id'):
+        return int(arg.split('|')[0][4:])
+    elif arg.isdigit():
+        return int(arg)
+    else:
+        return None
 
-def process_event(event):
-    try:
-        if event.type != VkEventType.MESSAGE_NEW or not event.to_me:
-            return
+# Функции для чат-менеджера
+def check_filter(message, chat_id):
+    cursor.execute('SELECT filter_words FROM chats WHERE chat_id = ?', (chat_id,))
+    words = cursor.fetchone()
+    if words:
+        bad_words = json.loads(words[0])
+        for word in bad_words:
+            if word.lower() in message.lower():
+                return True
+    return False
 
-        user_id = event.user_id
-        cleanup_old_applications()
-        incoming_text = (event.text or "").strip()
-        text = incoming_text.lower()
+def check_flood(user_id, chat_id):
+    user = get_user(user_id)
+    if user:
+        now = int(time.time())
+        last = user[11] if len(user) > 11 else 0
+        cursor.execute('SELECT antiflood FROM chats WHERE chat_id = ?', (chat_id,))
+        limit_row = cursor.fetchone()
+        limit = limit_row[0] if limit_row else 5
+        if now - last < 60:
+            # Увеличиваем счетчик (добавим поле message_count в users)
+            count = user[12] if len(user) > 12 else 0
+            count += 1
+            update_user(user_id, message_count=count)
+            if count > limit:
+                return True
+        else:
+            update_user(user_id, message_count=1, last_message=now)
+    return False
 
-        # --- Старт ---
-        if text in ["/start", "/старт", "старт", "start", "начать", "/начать"]:
-            send_message(
-                user_id,
-                "Добро пожаловать!\n\n"
-                "Скачать игру: https://t.me/rolls_russia\n"
-                "Владелец -- @sanzhardell\n\n"
-                "1) Нажми кнопку \"📄 Отправить норму\" или \"🐞 Нашел баг\".\n"
-                "2) Заполни форму (несколько вопросов).\n"
-                "3) Получишь ответ здесь, и владелец сможет одобрить/отклонить.",
-                keyboard=make_main_keyboard(),
-            )
-            return
+def add_exp(user_id, peer_id):
+    user = get_user(user_id)
+    if user:
+        exp = user[9] + random.randint(1, 5)
+        level = user[10]
+        if exp >= level * 100:
+            level += 1
+            exp = 0
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] Повысил уровень до {level}!', random_id=random.randint(1, 1000))
+        update_user(user_id, exp=exp, level=level)
 
-        # --- Помощь ---
-        if text in ["/help", "help", "помощь", "ℹ️ помощь"]:
-            send_message(
-                user_id,
-                "Я помогу тебе отправить норму, баг-репорт или предложение по улучшению.\n\n"
-                "1) Нажми кнопку \"📄 Отправить норму\", \"🐞 Нашел баг\" или \"💡 Предложение\".\n"
-                "2) Ответь на вопросы.\n"
-                "3) После отправки владелец получит твою заявку и сможет принять решение.\n\n"
-                "Для статуса заявок нажми \"📋 Мои заявки\".\n"
-                "После одобрения предложения ты получишь 50к донат рублей!",
-                keyboard=make_main_keyboard(),
-            )
-            return
+def check_punishments():
+    while True:
+        now = datetime.now().timestamp()
+        cursor.execute('SELECT user_id, mutes FROM users WHERE mutes IS NOT NULL')
+        for row in cursor.fetchall():
+            mutes = json.loads(row[1])
+            if mutes['until'] < now:
+                update_user(row[0], mutes=None)
+        cursor.execute('SELECT user_id, bans FROM users WHERE bans IS NOT NULL')
+        for row in cursor.fetchall():
+            bans = json.loads(row[1])
+            if bans['until'] < now:
+                update_user(row[0], bans=None)
+        time.sleep(60)
 
-        # --- Мои заявки ---
-        if text in ["/myapps", "/myapps", "/мои заявки", "мои заявки", "📋 мои заявки"]:
-            send_message(user_id, list_applications_for_user(user_id), keyboard=make_main_keyboard())
-            return
+# Запуск потока для снятия наказаний
+threading.Thread(target=check_punishments, daemon=True).start()
 
-        # --- Начало нормы ---
-        if text.startswith("/norma") or text in ["📄 отправить норму"]:
-            user_data[user_id] = {"step": 1, "type": "norma", "data": {}}
-            send_message(
-                user_id,
-                "1. Ваш Nickname:",
-                keyboard=make_cancel_keyboard(),
-            )
-            return
+# Обработчики команд
+def handle_command(event, command, args, peer_id):
+    # Безопасно извлекаем user_id/message_id из события, если они есть
+    message_id = None
+    user_id = None
+    if hasattr(event, 'object') and isinstance(event.object, dict):
+        message = event.object.get('message', {})
+        if isinstance(message, dict):
+            user_id = message.get('from_id')
+            message_id = message.get('id')
 
-        # --- Начало бага ---
-        if text.startswith("/bug") or text in ["🐞 нашел баг", "нашел баг", "нашёл баг", "баг"]:
-            user_data[user_id] = {"step": 1, "type": "bug", "data": {}}
-            send_message(
-                user_id,
-                "1. Краткое описание бага:",
-                keyboard=make_cancel_keyboard(),
-            )
-            return
+    chat_id = peer_id - 2000000000 if peer_id > 2000000000 else None
 
-        # --- Начало предложения по улучшению ---
-        if text.startswith("/proposal") or text in ["💡 предложение", "предложение", "предложение по улучшению"]:
-            user_data[user_id] = {"step": 1, "type": "improvement", "data": {}}
-            send_message(
-                user_id,
-                "1. Что вы хотите добавить?",
-                keyboard=make_cancel_keyboard(),
-            )
-            return
+    print(f"Handling command: {command} by {user_id}")  # Отладка
 
-        # --- Шаги заполнения ---
-        if user_id in user_data:
-            data = user_data[user_id]
-            step = data["step"]
-            kind = data.get("type", "norma")
+    # Участник (0)
+    if command == '/start':
+        vk.messages.send(peer_id=peer_id, message='Бот Limit активирован в беседе!', random_id=random.randint(1, 1000))
 
-            # Отмена заполнения
-            if text in ["/cancel", "cancel", "отмена", "❌ отмена"]:
-                send_message(user_id, "Заполнение отменено.", keyboard=make_main_keyboard())
-                del user_data[user_id]
-                return
+    elif command == '/help':
+        help_text = '''
+🤖 Бот Limit - Команды:
 
-            # В любой момент можно посмотреть свои заявки
-            if text in ["/myapps", "/myapps", "/мои заявки", "мои заявки", "📋 мои заявки"]:
-                send_message(user_id, list_applications_for_user(user_id), keyboard=make_main_keyboard())
-                return
+👤 Команды Участника (0): /start /help /ping /stats /mybans /staff /quit /roles /rules /id /online /apply /ai /anon /getnick /nick /nicklist /nonicks /promo /remind /report
 
-            # Норма: собираем поля по шагам
-            if kind == "norma":
-                if step == 1:
-                    data["data"]["nickname"] = incoming_text
-                    data["step"] = 2
-                    send_message(user_id, "2. Ваша должность:", keyboard=make_cancel_keyboard())
-                elif step == 2:
-                    data["data"]["position"] = incoming_text
-                    data["step"] = 3
-                    send_message(user_id, "3. Доказательства (ссылка на пост VK):", keyboard=make_cancel_keyboard())
-                elif step == 3:
-                    link = extract_vk_link(incoming_text)
-                    if not link:
-                        send_message(
-                            user_id,
-                            "Неверная ссылка. Отправь ссылку на пост, например: https://vk.com/wall-123456_7890",
-                            keyboard=make_cancel_keyboard(),
-                        )
-                        return
+🛠 Помощник (20): /baninfo /getwarn /mutelist /warnlist /muteinfo /fornick /banlist
 
-                    data["data"]["proof"] = link
-                    data["step"] = 4
-                    send_message(user_id, "4. Что сделали:", keyboard=make_cancel_keyboard())
-                elif step == 4:
-                    data["data"]["done"] = incoming_text
-                    data["step"] = 5
-                    send_message(user_id, "5. Сервер (TVER = -1 / PERM = -2):", keyboard=make_cancel_keyboard())
-                elif step == 5:
-                    server_value = incoming_text.lower()
-                    server_map = {
-                        "-1": ("TVER", OWNER_0),
-                        "tver": ("TVER", OWNER_0),
-                        "1": ("TVER", OWNER_0),
-                        "-2": ("PERM", OWNER_1),
-                        "perm": ("PERM", OWNER_1),
-                        "2": ("PERM", OWNER_1),
-                    }
-                    if server_value not in server_map:
-                        send_message(user_id, "Неверный выбор. Напиши -1 (TVER) или -2 (PERM).", keyboard=make_cancel_keyboard())
-                        return
+⚖ Модератор (40): /mute /unmute /warn /unwarn /kick /del /pin /unpin /zov /prewarn /preunwarn /removenick /setnick
 
-                    server_label, owner_raw = server_map[server_value]
-                    data["data"]["server"] = server_label
+🏛 Админ (60): /ban /unban /setrole /removerole /gmute /gunmute /gremovenick /gsetnick
 
-                    owner_id = resolve_user_id(owner_raw)
-                    if owner_id is None:
-                        print(f"Ошибка: не удалось получить numeric user_id для владельца (owner_raw={owner_raw})")
-                        send_message(user_id, "Не удалось отправить заявку — проверь настройки OWNER_0/OWNER_1.")
-                    else:
-                        app = _create_application(user_id, "norma", data["data"], owner_id)
-                        _send_app_to_owner(app)
-                        send_message(user_id, "Заявка отправлена ✅", keyboard=make_main_keyboard())
+👑 Гл. Админ (80): /createrole /deleterole /access /gm /sync /filter /chatdata /config /gban /gkick /grole /gunban /gwarn /gunwarn /kickdog
 
-                    del user_data[user_id]
-                return
+🏰 Владелец (100): /deactivate
 
-            # Баг-репорт: собираем поля по шагам
-            if kind == "bug":
-                if step == 1:
-                    data["data"]["description"] = incoming_text
-                    data["step"] = 2
-                    send_message(user_id, "2. Где находится баг?", keyboard=make_cancel_keyboard())
-                elif step == 2:
-                    data["data"]["location"] = incoming_text
-                    data["step"] = 3
-                    send_message(user_id, "3. Что вы хотите сделать с этим багом?", keyboard=make_cancel_keyboard())
-                elif step == 3:
-                    data["data"]["desired"] = incoming_text
-                    data["step"] = 4
-                    send_message(
-                        user_id,
-                        "4. Ссылка/скриншот/пост ВК (обязательно) или напиши 'пропустить':",
-                        keyboard=make_cancel_keyboard(),
-                    )
-                elif step == 4:
-                    if not incoming_text.strip() or incoming_text.lower() in ["пропустить", "skip", "-", "нет"]:
-                        data["data"]["proof"] = ""
-                    else:
-                        data["data"]["proof"] = incoming_text
+🎭 RP: /breast /hug /iznas /kiss /mitet /spank
 
-                    owner_id = resolve_user_id(BUG_OWNER)
-                    if owner_id is None:
-                        print(f"Ошибка: не удалось получить numeric user_id для владельца бага (BUG_OWNER={BUG_OWNER})")
-                        send_message(user_id, "Не удалось отправить баг-репорт — проверь настройки BUG_OWNER.")
-                    else:
-                        app = _create_application(user_id, "bug", data["data"], owner_id)
-                        _send_app_to_owner(app)
-                        send_message(user_id, "Баг-репорт отправлен ✅", keyboard=make_main_keyboard())
+🎮 Игры: /profile /top /pay /marriage /marriages /divorce /mymarriage /exes
 
-                    del user_data[user_id]
-                return
+🎲 Новые команды: /clear /slowmode /rps /guess /quote /fact /poll /vote /afk /userinfo /toplevel
+        '''
+        vk.messages.send(peer_id=peer_id, message=help_text, random_id=random.randint(1, 1000))
 
-            # Предложение по улучшению: собираем поля по шагам
-            if kind == "improvement":
-                if step == 1:
-                    data["data"]["what"] = incoming_text
-                    data["step"] = 2
-                    send_message(user_id, "2. Как думаете, зачем это нужно?", keyboard=make_cancel_keyboard())
-                elif step == 2:
-                    data["data"]["why"] = incoming_text
-                    data["step"] = 3
-                    send_message(user_id, "3. Краткая информация о предложении:", keyboard=make_cancel_keyboard())
-                elif step == 3:
-                    data["data"]["details"] = incoming_text
-                    owner_id = resolve_user_id(BUG_OWNER)
-                    if owner_id is None:
-                        print(f"Ошибка: не удалось получить numeric user_id для владельца предложений (BUG_OWNER={BUG_OWNER})")
-                        send_message(user_id, "Не удалось отправить предложение — проверь настройки BUG_OWNER.")
-                    else:
-                        app = _create_application(user_id, "improvement", data["data"], owner_id)
-                        _send_app_to_owner(app)
-                        send_message(
-                            user_id,
-                            "Предложение отправлено ✅\nЕсли его одобрят, ты получишь 50к донат рублей!",
-                            keyboard=make_main_keyboard(),
-                        )
+    elif command == '/ping':
+        vk.messages.send(peer_id=peer_id, message='Pong!', random_id=random.randint(1, 1000))
 
-                    del user_data[user_id]
-                return
+    elif command == '/stats':
+        user = get_user(user_id)
+        if user:
+            msg = f'Роль: {user[1]}\nНик: {user[2] or "Нет"}\nИскры: {user[3]}\nПредупреждения: {user[4]}'
+        else:
+            msg = 'Статистика не найдена'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
 
-        # --- Ответ владельца ---
-        if user_id in applications_by_owner:
-            # Принимаем +<id> / -<id> или кнопки вида '✅ Одобрить #<id>'
-            action, app_id = _parse_owner_response(text)
-            if action and not app_id:
-                # Если указано только + или -, и у владельца одна активная заявка
-                owner_apps = [
-                    a
-                    for a in applications_by_owner.get(user_id, [])
-                    if applications.get(a, {}).get("status") == "pending"
-                ]
-                if len(owner_apps) == 1:
-                    app_id = owner_apps[0]
+    elif command == '/mybans':
+        user = get_user(user_id)
+        bans = json.loads(user[6]) if user and user[6] else None
+        if bans:
+            msg = f'Бан до: {datetime.fromtimestamp(bans["until"]).strftime("%Y-%m-%d %H:%M")}\nПричина: {bans["reason"]}'
+        else:
+            msg = 'У вас нет банов'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
 
-            app = None
-            if app_id and app_id in applications:
-                candidate = applications[app_id]
-                if candidate.get("owner_id") == user_id:
-                    app = candidate
+    elif command == '/staff':
+        cursor.execute('SELECT user_id, role FROM users WHERE role >= 20')
+        staff = cursor.fetchall()
+        msg = 'Администрация:\n' + '\n'.join([f'[id{u[0]}|ID {u[0]}] - Роль {u[1]}' for u in staff])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
 
-            if app is not None and action in ["+", "-"]:
-                status = "approved" if action == "+" else "rejected"
-                app["status"] = status
-                applicant_id = app.get("user_id")
-                if status == "approved":
-                    send_message(applicant_id, "Заявка одобрена ✅")
-                    send_message(user_id, "Вы одобрили заявку ✅")
-                else:
-                    send_message(applicant_id, "Заявка отклонена ❌")
-                    send_message(user_id, "Вы отклонили заявку ❌")
+    elif command == '/quit':
+        vk.messages.removeChatUser(chat_id=chat_id, user_id=user_id)
+        vk.messages.send(peer_id=peer_id, message='Вы покинули беседу', random_id=random.randint(1, 1000))
+
+    elif command == '/roles':
+        print("Executing /roles")
+        cursor.execute('SELECT priority, name FROM roles')
+        roles = cursor.fetchall()
+        msg = 'Роли:\n' + '\n'.join([f'{r[0]} - {r[1]}' for r in roles])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/rules':
+        cursor.execute('SELECT rules FROM chats WHERE chat_id = ?', (chat_id,))
+        rules = cursor.fetchone()
+        msg = rules[0] if rules else 'Правила не установлены'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/id':
+        vk.messages.send(peer_id=peer_id, message=f'Ваш ID: {user_id}', random_id=random.randint(1, 1000))
+
+    elif command == '/online':
+        # Получить онлайн участников (упрощенно)
+        members = vk.messages.getConversationMembers(peer_id=peer_id)
+        online = [m['member_id'] for m in members['items'] if m.get('online')]
+        msg = f'Онлайн: {len(online)} участников'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/apply':
+        vk.messages.send(peer_id=peer_id, message='Заявка отправлена администрации', random_id=random.randint(1, 1000))
+
+    elif command == '/ai':
+        vk.messages.send(peer_id=peer_id, message='ИИ временно не работает', random_id=random.randint(1, 1000))
+
+    elif command == '/anon':
+        if args:
+            msg = ' '.join(args)
+            vk.messages.send(peer_id=peer_id, message=f'Аноним: {msg}', random_id=random.randint(1, 1000))
+
+    elif command == '/getnick':
+        if args:
+            target_id = parse_user(args[0])
+            user = get_user(target_id)
+            nick = user[2] if user else 'Нет'
+            vk.messages.send(peer_id=peer_id, message=f'Ник: {nick}', random_id=random.randint(1, 1000))
+
+    elif command == '/nicklist':
+        cursor.execute('SELECT user_id, nick FROM users WHERE nick IS NOT NULL')
+        nicks = cursor.fetchall()
+        msg = 'Ники:\n' + '\n'.join([f'[id{u[0]}| ] - {u[1]}' for u in nicks])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/nonicks':
+        cursor.execute('SELECT user_id FROM users WHERE nick IS NULL')
+        nonicks = cursor.fetchall()
+        msg = 'Без ников:\n' + '\n'.join([f'[id{u[0]}| ]' for u in nonicks])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/promo':
+        vk.messages.send(peer_id=peer_id, message='Промокод активирован', random_id=random.randint(1, 1000))
+
+    elif command == '/remind':
+        if len(args) >= 2:
+            time_str = args[0]
+            message = ' '.join(args[1:])
+            # Упрощенно, добавить в reminders
+            cursor.execute('INSERT INTO reminders (user_id, time, message) VALUES (?, ?, ?)', (user_id, int(time.time()) + 60, message))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message='Напоминание установлено', random_id=random.randint(1, 1000))
+
+    elif command == '/report':
+        if args:
+            report = ' '.join(args)
+            vk.messages.send(peer_id=peer_id, message='Обращение отправлено администрации', random_id=random.randint(1, 1000))
+
+    # Помощник (20)
+    elif command == '/baninfo' and check_permission(user_id, 20):
+        if args:
+            target_id = parse_user(args[0])
+            user = get_user(target_id)
+            bans = json.loads(user[6]) if user and user[6] else None
+            msg = f'Бан: {bans}' if bans else 'Нет бана'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/getwarn' and check_permission(user_id, 20):
+        if args:
+            target_id = parse_user(args[0])
+            user = get_user(target_id)
+            warns = user[4] if user else 0
+            vk.messages.send(peer_id=peer_id, message=f'Предупреждения: {warns}', random_id=random.randint(1, 1000))
+
+    elif command == '/mutelist' and check_permission(user_id, 20):
+        cursor.execute('SELECT user_id, mutes FROM users WHERE mutes IS NOT NULL')
+        mutes = cursor.fetchall()
+        msg = 'Замьюченные:\n' + '\n'.join([f'[id{u[0]}| ] - {u[1]}' for u in mutes])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/warnlist' and check_permission(user_id, 20):
+        cursor.execute('SELECT user_id, warns FROM users WHERE warns > 0')
+        warns = cursor.fetchall()
+        msg = 'Предупреждения:\n' + '\n'.join([f'[id{u[0]}| ] - {u[1]}' for u in warns])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/muteinfo' and check_permission(user_id, 20):
+        if args:
+            target_id = parse_user(args[0])
+            user = get_user(target_id)
+            mutes = json.loads(user[5]) if user and user[5] else None
+            msg = f'Мут: {mutes}' if mutes else 'Нет мута'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/fornick' and check_permission(user_id, 20):
+        if args:
+            nick = ' '.join(args)
+            cursor.execute('SELECT user_id FROM users WHERE nick = ?', (nick,))
+            user = cursor.fetchone()
+            msg = f'Пользователь: [id{user[0]}| ]' if user else 'Не найден'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/banlist' and check_permission(user_id, 20):
+        cursor.execute('SELECT user_id, bans FROM users WHERE bans IS NOT NULL')
+        bans = cursor.fetchall()
+        msg = 'Забаненные:\n' + '\n'.join([f'[id{u[0]}| ] - {u[1]}' for u in bans])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    # Модератор (40)
+    elif command == '/mute' and check_permission(user_id, 40):
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            minutes = int(args[1])
+            reason = ' '.join(args[2:]) if len(args) > 2 else 'Не указана'
+            if target_id:
+                mute_until = (datetime.now() + timedelta(minutes=minutes)).timestamp()
+                update_user(target_id, mutes=json.dumps({'until': mute_until, 'reason': reason}))
+                vk.messages.send(peer_id=peer_id, message=f'Замьючен на {minutes} мин. Причина: {reason}', random_id=random.randint(1, 1000))
+
+    elif command == '/unmute' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(target_id, mutes=None)
+                vk.messages.send(peer_id=peer_id, message='Размьючен', random_id=random.randint(1, 1000))
+
+    elif command == '/warn' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            reason = ' '.join(args[1:]) if len(args) > 1 else 'Не указана'
+            if target_id:
+                user = get_user(target_id)
+                warns = user[4] + 1 if user else 1
+                update_user(target_id, warns=warns)
+                vk.messages.send(peer_id=peer_id, message=f'Предупреждение. Всего: {warns}. Причина: {reason}', random_id=random.randint(1, 1000))
+
+    elif command == '/unwarn' and check_permission(user_id, 40):
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            num = int(args[1])
+            if target_id:
+                user = get_user(target_id)
+                warns = max(0, user[4] - num) if user else 0
+                update_user(target_id, warns=warns)
+                vk.messages.send(peer_id=peer_id, message=f'Снято {num} предупреждений', random_id=random.randint(1, 1000))
+
+    elif command == '/kick' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            reason = ' '.join(args[1:]) if len(args) > 1 else 'Не указана'
+            if target_id:
+                vk.messages.removeChatUser(chat_id=chat_id, user_id=target_id)
+                vk.messages.send(peer_id=peer_id, message=f'Исключен. Причина: {reason}', random_id=random.randint(1, 1000))
+
+    elif command == '/del' and check_permission(user_id, 40):
+        if message_id:
+            vk.messages.delete(message_ids=[message_id])
+            vk.messages.send(peer_id=peer_id, message='Сообщение удалено', random_id=random.randint(1, 1000))
+
+    elif command == '/pin' and check_permission(user_id, 40):
+        if message_id:
+            vk.messages.pin(peer_id=peer_id, message_id=message_id)
+            vk.messages.send(peer_id=peer_id, message='Закреплено', random_id=random.randint(1, 1000))
+
+    elif command == '/unpin' and check_permission(user_id, 40):
+        vk.messages.unpin(peer_id=peer_id)
+        vk.messages.send(peer_id=peer_id, message='Откреплено', random_id=random.randint(1, 1000))
+
+    elif command == '/zov' and check_permission(user_id, 40):
+        vk.messages.send(peer_id=peer_id, message='@all Участники, внимание!', random_id=random.randint(1, 1000))
+
+    elif command == '/prewarn' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            reason = ' '.join(args[1:]) if len(args) > 1 else 'Не указана'
+            vk.messages.send(peer_id=peer_id, message=f'[id{target_id}| ] Устное предупреждение. Причина: {reason}', random_id=random.randint(1, 1000))
+
+    elif command == '/preunwarn' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{target_id}| ] Устное предупреждение снято', random_id=random.randint(1, 1000))
+
+    elif command == '/removenick' and check_permission(user_id, 40):
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(target_id, nick=None)
+                vk.messages.send(peer_id=peer_id, message='Ник удален', random_id=random.randint(1, 1000))
+
+    elif command == '/nick':
+        nick = ' '.join(args)
+        if nick:
+            update_user(user_id, nick=nick)
+            vk.messages.send(peer_id=peer_id, message=f'Ваш ник установлен: {nick}', random_id=random.randint(1, 1000))
+        else:
+            vk.messages.send(peer_id=peer_id, message='Укажите ник', random_id=random.randint(1, 1000))
+
+    elif command == '/setnick' and check_permission(user_id, 40):
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            nick = ' '.join(args[1:])
+            if target_id:
+                update_user(target_id, nick=nick)
+                vk.messages.send(peer_id=peer_id, message=f'Ник установлен: {nick}', random_id=random.randint(1, 1000))
+
+    # Админ (60)
+    elif command == '/ban' and check_permission(user_id, 60):
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            days = int(args[1])
+            reason = ' '.join(args[2:]) if len(args) > 2 else 'Не указана'
+            if target_id:
+                ban_until = (datetime.now() + timedelta(days=days)).timestamp()
+                update_user(target_id, bans=json.dumps({'until': ban_until, 'reason': reason}))
+                vk.messages.removeChatUser(chat_id=chat_id, user_id=target_id)
+                vk.messages.send(peer_id=peer_id, message=f'Забанен на {days} дней. Причина: {reason}', random_id=random.randint(1, 1000))
+                log_action(f'Ban: {target_id} by {user_id} for {days} days, reason: {reason}')
+
+    elif command == '/unban' and check_permission(user_id, 60):
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(target_id, bans=None)
+                vk.messages.send(peer_id=peer_id, message='Разбанен', random_id=random.randint(1, 1000))
+
+    elif command == '/setrole' and check_permission(user_id, 60):
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            role = int(args[1])
+            if target_id:
+                update_user(target_id, role=role)
+                vk.messages.send(peer_id=peer_id, message=f'Роль установлена: {role}', random_id=random.randint(1, 1000))
+
+    elif command == '/removerole' and check_permission(user_id, 60):
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(target_id, role=0)
+                vk.messages.send(peer_id=peer_id, message='Роль снята', random_id=random.randint(1, 1000))
+
+    # Гл. Админ (80)
+    elif command == '/createrole' and check_permission(user_id, 80):
+        if len(args) >= 2:
+            priority = int(args[0])
+            name = ' '.join(args[1:])
+            cursor.execute('INSERT INTO roles (priority, name) VALUES (?, ?)', (priority, name))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message=f'Роль создана: {name} ({priority})', random_id=random.randint(1, 1000))
+
+    elif command == '/deleterole' and check_permission(user_id, 80):
+        if args:
+            priority = int(args[0])
+            cursor.execute('DELETE FROM roles WHERE priority = ?', (priority,))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message='Роль удалена', random_id=random.randint(1, 1000))
+
+    elif command == '/access' and check_permission(user_id, 80):
+        vk.messages.send(peer_id=peer_id, message='Настройка доступа (заглушка)', random_id=random.randint(1, 1000))
+
+    elif command == '/gm' and check_permission(user_id, 80):
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(target_id, role=100)  # Иммунитет
+                vk.messages.send(peer_id=peer_id, message='Иммунитет установлен', random_id=random.randint(1, 1000))
+
+    elif command == '/sync' and check_permission(user_id, 80):
+        vk.messages.send(peer_id=peer_id, message='Синхронизировано', random_id=random.randint(1, 1000))
+
+    elif command == '/filter' and check_permission(user_id, 80):
+        vk.messages.send(peer_id=peer_id, message='Фильтр настроен', random_id=random.randint(1, 1000))
+
+    elif command == '/chatdata' and check_permission(user_id, 80):
+        vk.messages.send(peer_id=peer_id, message=f'Информация о чате: ID {chat_id}', random_id=random.randint(1, 1000))
+
+    elif command == '/config' and check_permission(user_id, 80):
+        vk.messages.send(peer_id=peer_id, message='Конфигурация изменена', random_id=random.randint(1, 1000))
+
+    # Владелец (100)
+    elif command == '/deactivate' and check_permission(user_id, 100):
+        # Деактивация
+        vk.messages.send(peer_id=peer_id, message='Беседа деактивирована', random_id=random.randint(1, 1000))
+
+    # RP
+    elif command == '/breast':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] прикоснулся к груди [id{target_id}| ] 💋', random_id=random.randint(1, 1000))
+
+    elif command == '/hug':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] обнял [id{target_id}| ] 🤗', random_id=random.randint(1, 1000))
+
+    elif command == '/iznas':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] надругался над [id{target_id}| ] 😈', random_id=random.randint(1, 1000))
+
+    elif command == '/kiss':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] поцеловал [id{target_id}| ] 😘', random_id=random.randint(1, 1000))
+
+    elif command == '/mitet':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] сделал приятно [id{target_id}| ] 😏', random_id=random.randint(1, 1000))
+
+    elif command == '/spank':
+        if args:
+            target_id = parse_user(args[0])
+            vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] шлёпнул по попе [id{target_id}| ] 🍑', random_id=random.randint(1, 1000))
+
+    # Игры
+    elif command == '/profile':
+        user = get_user(user_id)
+        msg = f'Профиль: Искры {user[3] if user else 0}'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/top':
+        cursor.execute('SELECT user_id, sparks FROM users ORDER BY sparks DESC LIMIT 10')
+        top = cursor.fetchall()
+        msg = 'Топ по искрам:\n' + '\n'.join([f'{i+1}. [id{u[0]}| ] - {u[1]}' for i, u in enumerate(top)])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/pay':
+        if len(args) >= 2:
+            target_id = parse_user(args[0])
+            amount = int(args[1])
+            user = get_user(user_id)
+            if user and user[3] >= amount:
+                update_user(user_id, sparks=user[3] - amount)
+                target = get_user(target_id)
+                update_user(target_id, sparks=(target[3] if target else 0) + amount)
+                vk.messages.send(peer_id=peer_id, message=f'Передано {amount} искр', random_id=random.randint(1, 1000))
             else:
-                send_message(user_id, "Не удалось найти заявку с таким ID или она уже обработана.")
-            return
+                vk.messages.send(peer_id=peer_id, message='Недостаточно искр', random_id=random.randint(1, 1000))
 
-    except Exception as e:
-        print(f"[ERROR] process_event error: {e}")
-        traceback.print_exc()
-        # Не ломаем цикл - просто игнорируем проблемное событие
-        return
+    elif command == '/marriage':
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(user_id, marriage=target_id)
+                update_user(target_id, marriage=user_id)
+                vk.messages.send(peer_id=peer_id, message='Предложение брака отправлено!', random_id=random.randint(1, 1000))
 
+    elif command == '/marriages':
+        cursor.execute('SELECT user_id, marriage FROM users WHERE marriage IS NOT NULL')
+        marriages = cursor.fetchall()
+        msg = 'Браки:\n' + '\n'.join([f'[id{u[0]}| ] + [id{u[1]}| ]' for u in marriages])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
 
-def run_bot():
-    print("Бот запущен...")
-    while True:
-        try:
-            for event in longpoll.listen():
-                process_event(event)
-        except Exception as e:
-            print(f"Ошибка в longpoll: {e}. Переподключаемся через 5 сек...")
-            time.sleep(5)
+    elif command == '/divorce':
+        if args:
+            target_id = parse_user(args[0])
+            if target_id:
+                update_user(user_id, marriage=None)
+                update_user(target_id, marriage=None)
+                vk.messages.send(peer_id=peer_id, message='Развод оформлен', random_id=random.randint(1, 1000))
 
+    elif command == '/mymarriage':
+        user = get_user(user_id)
+        partner = user[7] if user else None
+        msg = f'Ваш партнер: [id{partner}| ]' if partner else 'Не женаты'
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
 
-if __name__ == "__main__":
-    # Дополнительный уровень защиты: если что-то упадет в run_bot(), перезапустимся.
-    # Используем BaseException, чтобы не завершаться при KeyboardInterrupt/SystemExit.
-    while True:
-        try:
-            run_bot()
-        except BaseException as e:
-            # Не даём боту выключаться ни при ошибке, ни при Ctrl+C
-            print(f"Критическая ошибка, перезапускаю бота через 5 сек: {e}")
-            traceback.print_exc()
-            time.sleep(5)
-            
-if __name__ == "__main__":
-    print("⚙️ Инициализация бота...", flush=True)
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    print("🌐 Flask запускается...", flush=True)
-    app.run(host='0.0.0.0', port=port, debug=False)
+    elif command == '/exes':
+        if args:
+            target_id = parse_user(args[0])
+            user = get_user(target_id)
+            exes = json.loads(user[8]) if user and user[8] else []
+            msg = f'Бывшие: {", ".join([str(e) for e in exes])}'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    # Новые улучшенные команды
+    elif command == '/clear' and check_permission(user_id, 40):
+        count = int(args[0]) if args and args[0].isdigit() else 10
+        # Удалить последние сообщения (упрощенно, VK не позволяет массово удалять)
+        vk.messages.send(peer_id=peer_id, message=f'Удалено {count} сообщений (симуляция)', random_id=random.randint(1, 1000))
+
+    elif command == '/slowmode' and check_permission(user_id, 60):
+        seconds = int(args[0]) if args and args[0].isdigit() else 0
+        cursor.execute('UPDATE chats SET slowmode = ? WHERE chat_id = ?', (seconds, chat_id))
+        conn.commit()
+        vk.messages.send(peer_id=peer_id, message=f'Slowmode установлен: {seconds} сек', random_id=random.randint(1, 1000))
+
+    elif command == '/rps':
+        choices = ['камень', 'ножницы', 'бумага']
+        user_choice = args[0].lower() if args else None
+        if user_choice in choices:
+            bot_choice = random.choice(choices)
+            if user_choice == bot_choice:
+                result = 'Ничья!'
+            elif (user_choice == 'камень' and bot_choice == 'ножницы') or (user_choice == 'ножницы' and bot_choice == 'бумага') or (user_choice == 'бумага' and bot_choice == 'камень'):
+                result = 'Ты выиграл!'
+            else:
+                result = 'Ты проиграл!'
+            vk.messages.send(peer_id=peer_id, message=f'Твой выбор: {user_choice}\nМой: {bot_choice}\n{result}', random_id=random.randint(1, 1000))
+        else:
+            vk.messages.send(peer_id=peer_id, message='Выбери: камень, ножницы, бумага', random_id=random.randint(1, 1000))
+
+    elif command == '/guess':
+        if not args:
+            number = random.randint(1, 100)
+            # Сохранить в сессии (упрощенно, в БД)
+            update_user(user_id, game=json.dumps({'type': 'guess', 'number': number}))
+            vk.messages.send(peer_id=peer_id, message='Угадай число от 1 до 100!', random_id=random.randint(1, 1000))
+        else:
+            guess = int(args[0])
+            user = get_user(user_id)
+            game = json.loads(user[9]) if user and user[9] else None  # Предположим поле game
+            if game and game['type'] == 'guess':
+                if guess == game['number']:
+                    vk.messages.send(peer_id=peer_id, message='Угадал! 🎉', random_id=random.randint(1, 1000))
+                    update_user(user_id, game=None)
+                elif guess < game['number']:
+                    vk.messages.send(peer_id=peer_id, message='Больше!', random_id=random.randint(1, 1000))
+                else:
+                    vk.messages.send(peer_id=peer_id, message='Меньше!', random_id=random.randint(1, 1000))
+            else:
+                vk.messages.send(peer_id=peer_id, message='Начни игру /guess', random_id=random.randint(1, 1000))
+
+    elif command == '/quote':
+        quotes = [
+            "Жизнь - это то, что с тобой происходит, пока ты строишь другие планы. - Джон Леннон",
+            "Будь собой; все остальные роли уже заняты. - Оскар Уайлд",
+            "Секрет успеха - постоянство цели. - Бенджамин Дизраэли"
+        ]
+        quote = random.choice(quotes)
+        vk.messages.send(peer_id=peer_id, message=f'Цитата: {quote}', random_id=random.randint(1, 1000))
+
+    elif command == '/fact':
+        facts = [
+            "Дельфины спят с одним открытым глазом.",
+            "Медузы состоят на 95% из воды.",
+            "Слон - единственное животное, которое не может прыгать."
+        ]
+        fact = random.choice(facts)
+        vk.messages.send(peer_id=peer_id, message=f'Факт: {fact}', random_id=random.randint(1, 1000))
+
+    elif command == '/poll' and check_permission(user_id, 40):
+        if len(args) >= 3:
+            question = args[0]
+            options = args[1:]
+            cursor.execute('INSERT INTO polls (chat_id, question, options) VALUES (?, ?, ?)', (chat_id, question, json.dumps(options)))
+            conn.commit()
+            poll_id = cursor.lastrowid
+            msg = f'Опрос: {question}\n' + '\n'.join([f'{i+1}. {opt}' for i, opt in enumerate(options)]) + f'\nГолосуй: /vote {poll_id} [номер]'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/vote':
+        if len(args) >= 2:
+            poll_id = int(args[0])
+            option = int(args[1]) - 1
+            cursor.execute('SELECT * FROM polls WHERE id = ? AND chat_id = ?', (poll_id, chat_id))
+            poll = cursor.fetchone()
+            if poll:
+                votes = json.loads(poll[4])
+                votes[str(user_id)] = option
+                cursor.execute('UPDATE polls SET votes = ? WHERE id = ?', (json.dumps(votes), poll_id))
+                conn.commit()
+                vk.messages.send(peer_id=peer_id, message='Голос учтен!', random_id=random.randint(1, 1000))
+
+    elif command == '/afk':
+        reason = ' '.join(args) if args else 'AFK'
+        cursor.execute('INSERT OR REPLACE INTO afk (user_id, reason, time) VALUES (?, ?, ?)', (user_id, reason, int(time.time())))
+        conn.commit()
+        vk.messages.send(peer_id=peer_id, message=f'AFK: {reason}', random_id=random.randint(1, 1000))
+
+    elif command == '/userinfo':
+        target_id = parse_user(args[0]) if args else user_id
+        user = get_user(target_id)
+        if user:
+            msg = f'ID: {user[0]}\nРоль: {user[1]}\nНик: {user[2] or "Нет"}\nИскры: {user[3]}\nУровень: {user[10] if len(user) > 10 else 1}'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    # Новые стандартные команды
+    elif command == '/setwelcome' and check_permission(user_id, 80):
+        if args:
+            welcome = ' '.join(args)
+            cursor.execute('UPDATE chats SET welcome = ? WHERE chat_id = ?', (welcome, chat_id))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message='Приветствие установлено', random_id=random.randint(1, 1000))
+
+    elif command == '/setrules' and check_permission(user_id, 80):
+        if args:
+            rules = ' '.join(args)
+            cursor.execute('UPDATE chats SET rules = ? WHERE chat_id = ?', (rules, chat_id))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message='Правила установлены', random_id=random.randint(1, 1000))
+
+    elif command == '/addfilter' and check_permission(user_id, 80):
+        if args:
+            word = args[0]
+            cursor.execute('SELECT filter_words FROM chats WHERE chat_id = ?', (chat_id,))
+            words = json.loads(cursor.fetchone()[0])
+            words.append(word)
+            cursor.execute('UPDATE chats SET filter_words = ? WHERE chat_id = ?', (json.dumps(words), chat_id))
+            conn.commit()
+            vk.messages.send(peer_id=peer_id, message=f'Слово "{word}" добавлено в фильтр', random_id=random.randint(1, 1000))
+
+    elif command == '/removefilter' and check_permission(user_id, 80):
+        if args:
+            word = args[0]
+            cursor.execute('SELECT filter_words FROM chats WHERE chat_id = ?', (chat_id,))
+            words = json.loads(cursor.fetchone()[0])
+            if word in words:
+                words.remove(word)
+                cursor.execute('UPDATE chats SET filter_words = ? WHERE chat_id = ?', (json.dumps(words), chat_id))
+                conn.commit()
+                vk.messages.send(peer_id=peer_id, message=f'Слово "{word}" удалено из фильтра', random_id=random.randint(1, 1000))
+
+    elif command == '/dice':
+        result = random.randint(1, 6)
+        vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] бросил кубик: {result}', random_id=random.randint(1, 1000))
+
+    elif command == '/coin':
+        result = 'Орёл' if random.choice([True, False]) else 'Решка'
+        vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] подбросил монету: {result}', random_id=random.randint(1, 1000))
+
+    elif command == '/level':
+        user = get_user(user_id)
+        if user:
+            msg = f'Уровень: {user[10]}, Опыт: {user[9]}/{user[10]*100}'
+            vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+    elif command == '/toplevel':
+        cursor.execute('SELECT user_id, level, exp FROM users ORDER BY level DESC, exp DESC LIMIT 10')
+        top = cursor.fetchall()
+        msg = 'Топ по уровню:\n' + '\n'.join([f'{i+1}. [id{u[0]}| ] - Ур. {u[1]}, Опыт {u[2]}' for i, u in enumerate(top)])
+        vk.messages.send(peer_id=peer_id, message=msg, random_id=random.randint(1, 1000))
+
+# Основной цикл
+try:
+    print("Starting longpoll listen...")
+    for event in longpoll.listen():
+        print(f"Event received: {event.type}")
+        if event.type == VkBotEventType.MESSAGE_NEW:
+            text = event.object['message']['text']
+            peer_id = event.object['message']['peer_id']
+            user_id = event.object['message']['from_id']
+            chat_id = peer_id - 2000000000 if peer_id > 2000000000 else None
+            print(f"Новое сообщение: {text} от {user_id} в {peer_id}")  # Отладка
+
+            # Проверка на мут
+            user = get_user(user_id)
+            if user and user[5]:  # mutes
+                mutes = json.loads(user[5])
+                if mutes['until'] > time.time():
+                    continue  # Игнорировать сообщение
+
+            # Проверка AFK
+            cursor.execute('SELECT reason FROM afk WHERE user_id = ?', (user_id,))
+            afk = cursor.fetchone()
+            if afk:
+                cursor.execute('DELETE FROM afk WHERE user_id = ?', (user_id,))
+                conn.commit()
+                vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] вернулся! Был AFK: {afk[0]}', random_id=random.randint(1, 1000))
+
+            # Проверка упоминаний AFK
+            for mention in re.findall(r'\[id(\d+)\|', text):
+                mention_id = int(mention)
+                cursor.execute('SELECT reason FROM afk WHERE user_id = ?', (mention_id,))
+                afk_mention = cursor.fetchone()
+                if afk_mention:
+                    vk.messages.send(peer_id=peer_id, message=f'[id{mention_id}| ] AFK: {afk_mention[0]}', random_id=random.randint(1, 1000))
+
+            # Фильтр слов
+            if chat_id and check_filter(text, chat_id):
+                vk.messages.delete(message_ids=[event.object['message']['id']])
+                vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] Сообщение удалено за запрещенные слова', random_id=random.randint(1, 1000))
+                continue
+
+            # Антифлуд
+            if chat_id and check_flood(user_id, chat_id):
+                # Мут за флуд
+                mute_until = (datetime.now() + timedelta(minutes=5)).timestamp()
+                update_user(user_id, mutes=json.dumps({'until': mute_until, 'reason': 'Флуд'}))
+                vk.messages.send(peer_id=peer_id, message=f'[id{user_id}| ] Замьючен за флуд на 5 минут', random_id=random.randint(1, 1000))
+                continue
+
+            # Slowmode
+            cursor.execute('SELECT slowmode FROM chats WHERE chat_id = ?', (chat_id,))
+            slow = cursor.fetchone()
+            if slow and slow[0] > 0:
+                if user and time.time() - user[11] < slow[0]:
+                    continue  # Игнорировать
+
+            # Добавление опыта
+            add_exp(user_id, peer_id)
+
+            if text.startswith('/'):
+                parts = text.split()
+                command = parts[0].lower()
+                args = parts[1:]
+                try:
+                    handle_command(event, command, args, peer_id)
+                except Exception as e:
+                    print(f"Ошибка в handle_command: {e}")
+                    log_action(f"Ошибка в handle_command: {e}")
+
+        elif event.type == VkBotEventType.CHAT_UPDATE:
+            # Приветствие при вступлении
+            if 'action' in event.object and event.object['action']['type'] == 'chat_invite_user':
+                new_user_id = event.object['action']['member_id']
+                chat_id = event.object['chat_id']
+                peer_id = 2000000000 + chat_id
+                cursor.execute('SELECT welcome FROM chats WHERE chat_id = ?', (chat_id,))
+                welcome = cursor.fetchone()
+                if welcome:
+                    vk.messages.send(peer_id=peer_id, message=welcome[0].replace('{user}', f'[id{new_user_id}| ]'), random_id=random.randint(1, 1000))
+except Exception as e:
+    print(f"Ошибка в основном цикле: {e}")
+    log_action(f"Ошибка в основном цикле: {e}")
