@@ -1,7 +1,0 @@
-services:
-  - type: web_service
-    name: vk-bot
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -u main.py
